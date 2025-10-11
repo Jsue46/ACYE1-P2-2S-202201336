@@ -1,9 +1,9 @@
 <div align="center">
   
-# 🔐 AES‑128 en AArch64 (Software Puro)
+# 🔐 AES-128 en AArch64 (Software Puro)
 
 **ARQUITECTURA DE COMPUTADORES Y ENSAMBLADORES 1**  
-_Implementación 100% en ensamblador AArch64, sin librerías. E/S por syscalls. Ejecución en QEMU._
+_Implementación 100% en ensamblador AArch64, sin libc ni librerías. E/S por syscalls. Ejecución en QEMU._
 
 [![Arquitectura AArch64](https://img.shields.io/badge/arch-AArch64-informational)](#)
 [![Sin librerías](https://img.shields.io/badge/libs-None-brightgreen)](#)
@@ -19,36 +19,38 @@ _Implementación 100% en ensamblador AArch64, sin librerías. E/S por syscalls. 
 - [✨ Resumen](#-resumen)
 - [🧩 Características](#-características)
 - [🚀 Arranque rápido](#-arranque-rápido)
-- [🛠️ Compilación y ejecución](#️-compilación-y-ejecución)
-- [📟 Uso](#-uso)
-- [🔎 Verificación (KAT NIST)](#-verificación-kat-nist)
-- [🧱 Estructura del proyecto](#-estructura-del-proyecto)
+- [🛠️ Requisitos / Build](#️-requisitos--build)
+- [📟 Uso (menú)](#-uso-menú)
+- [🧪 Verificación (KAT NIST)](#-verificación-kat-nist)
+- [🧱 Estructura](#-estructura)
 - [🧠 Diseño / Decisiones](#-diseño--decisiones)
-- [🧪 Depuración](#-depuración)
+- [🔍 Funciones clave del código](#-funciones-clave-del-código)
+- [🐞 Depuración y tips](#-depuración-y-tips)
+- [📏 Checklist de rúbrica (enunciado)](#-checklist-de-rúbrica-enunciado)
 - [📈 Roadmap](#-roadmap)
 - [🤝 Contribuir](#-contribuir)
 - [📜 Licencia](#-licencia)
 
 ## ✨ Resumen
-Este repo contiene un cifrador **AES‑128** implementado **íntegramente en ensamblador AArch64**.  
-No usa `libc` ni bibliotecas externas: toda la E/S se realiza con **syscalls**. Incluye **expansión de clave**, **10 rondas** y **trazas del estado** tras cada transformación para fines didácticos.
+Cifrador **AES-128** implementado **íntegramente en ensamblador AArch64**.  
+**Sin libc** ni librerías externas: toda la E/S se realiza vía **syscalls**. Incluye **expansión de clave**, **10 rondas**, **trazas por etapa** (SubBytes, ShiftRows, MixColumns, AddRoundKey), **criptograma** y **tiempo de ejecución** en milisegundos con 3 decimales.
 
-> **Objetivo**: comprender a bajo nivel la representación del _state_, `ShiftRows`, `MixColumns`, `SubBytes`, `AddRoundKey` y el _key schedule_.
+> **Objetivo didáctico**: comprender a bajo nivel el _state_ (column-major), `SubBytes`, `ShiftRows`, `MixColumns`, `AddRoundKey` y el _key schedule_.
 
 ## 🧩 Características
-- 🔧 **AArch64 puro**: ensamblado con `aarch64-linux-gnu-as`, enlazado con `ld` (sin `-lc`).  
-- 🧠 **State en column‑major** y presentación amigable por filas (4×4).  
-- 🧪 **Trazas**: matrices del estado tras cada etapa (opcional mediante flag).  
-- ⏱️ **Medición de tiempo** con `clock_gettime(CLOCK_MONOTONIC)`.  
-- 🧰 **Makefile** con targets simples (`make`, `make run`, `make clean`).
+- 🔧 **AArch64 puro**: `aarch64-linux-gnu-as` + `ld` (sin `-lc`).
+- 🔢 **State en column-major**, impresión por filas (4×4) para legibilidad.
+- 🧪 **Trazas por ronda**: imprime la matriz tras cada transformación.
+- ⏱️ **Timing real** con `clock_gettime` (syscall 113) → ms con 3 decimales.
+- 🧰 **Makefile** (`make`, `make run`, `make clean`) y menú interactivo.
 
 ## 🚀 Arranque rápido
 ```bash
 # Clonar
 git clone https://github.com/Jsue46/ACYE1-P2-2S-202201336.git
-cd /home/kali/Documentos/Arqui 1/Proyecto2/ACYE1-P2-2S-202201336/aes_main.s
+cd ACYE1-P2-2S-202201336
 
-# Ensamblar y enlazar
+# Compilar y enlazar (sin libc)
 aarch64-linux-gnu-as -g -march=armv8-a -o aes_main.o aes_main.s
 aarch64-linux-gnu-ld -o aes aes_main.o
 
@@ -56,21 +58,19 @@ aarch64-linux-gnu-ld -o aes aes_main.o
 qemu-aarch64 ./aes
 ```
 
-> También puedes usar:  
+> O usa Make:
 > ```bash
 > make        # compila
 > make run    # compila y ejecuta
 > make clean  # limpia artefactos
 > ```
 
-## 🛠️ Compilación y ejecución
-Requisitos:
-- `binutils-aarch64-linux-gnu` (o toolchain equivalente)
-- `qemu-user` (`qemu-aarch64`)
-- GNU Make (opcional, si usas Makefile)
+## 🛠️ Requisitos / Build
+- `binutils-aarch64-linux-gnu`
+- `qemu-user` (binario `qemu-aarch64`)
+- GNU Make (opcional)
 
-## 📟 Uso
-Al ejecutar verás un **menú interactivo**:
+## 📟 Uso (menú)
 ```
 === MENU AES-128 ===
 1) Ingresar TEXTO (ASCII)
@@ -80,11 +80,51 @@ Al ejecutar verás un **menú interactivo**:
 5) Salir
 > 
 ```
-- **1)** Introduce hasta 16 caracteres ASCII (se rellena con 0 si son menos).
-- **2)** Introduce **32** dígitos hex (clave de 128 bits).
-- **3)** Ejecuta el cifrado, imprime tiempos y matrices (si debug activo).
-- **4)** Muestra info y **vector NIST** de referencia.
-- **5)** Salir.
+- **1)** Texto ASCII (hasta 16 chars; se _paddea_ con 0 si son menos).
+- **2)** Clave **hex de 32 dígitos** (128 bits). Valida y convierte a bytes.
+- **3)** Ejecuta AES-128 completo (10 rondas), imprime **trazas**, **criptograma** y **tiempo**.
+- **4)** Muestra **info** + **vector NIST** de referencia.
+- **5)** Salida.
+
+### 🖨️ Ejemplo de sesión (real, recortado)
+```
+> 1
+Ingrese el texto a cifrar (maximo 16 caracteres): Hoy llueve mucho
+Matriz de Estado:
+48 6C 76 75 
+6F 6C 65 63 
+79 75 20 68 
+20 65 6D 6F 
+
+> 2
+Ingrese la clave (32 caracteres hex): 0123456789ABCDEF0123456789ABCDEF
+Matriz de Clave:
+01 89 01 89 
+23 AB 23 AB 
+45 CD 45 CD 
+67 EF 67 EF 
+
+> 3
+Ejecutando AES-128...
+
+=== RONDA 1 ===
+Despues de SubBytes:
+Matriz de Estado:
+3B D9 F5 B0 
+...
+=== CRIPTOGRAMA FINAL ===
+Matriz de Estado:
+62 46 42 C4 
+83 D0 08 ED 
+DF 04 66 C9 
+F9 A6 25 C0 
+
+Texto cifrado: (ASCII crudo o HEX, según función usada)
+Tiempo de ejecucion: 6.xxx ms
+Listo.
+```
+
+> 🔎 **Nota**: El criptograma puede contener bytes no imprimibles. Para ver **HEX continuo**, usa la función `print_cipher_text` (incluida). Para ver caracteres directos, `print_cipher_text_ascii`.
 
 ## 🔎 Verificación (KAT NIST)
 Prueba con el vector estándar:
@@ -93,30 +133,32 @@ Key: 000102030405060708090A0B0C0D0E0F
 PT : 00112233445566778899AABBCCDDEEFF
 CT : 69C4E0D86A7B0430D8CDB78070B4C55A
 ```
-> Si ingresas esa **Key** y ese **PT**, el programa debe producir exactamente ese **CT**.
+> Ingresando esa **Key** y ese **PT**, el programa debe producir exactamente ese **CT**.
 
-## 🧱 Estructura del proyecto
+## 🧱 Estructura
 ```
 .
-├─ aes_main.s            # Código principal (syscalls, menú, primitivas AES, key schedule)
-├─ constants.s           # Tablas S-Box, Rcon y constantes
+├─ aes_main.s            # Código principal (syscalls, menú, AES, timing)
+├─ constants.s           # S-Box, Rcon y constantes asociadas
 ├─ Makefile              # Tareas de build/ejecución
 ├─ README.md             # Este documento
 └─ docs/
-   └─ ├─ Informe técnico
-      └─ Informe De Impacto
+   ├─ Informe técnico
+   └─ Informe de Impacto
 ```
 
 ## 🧠 Diseño / Decisiones
 - **Representación del estado**
-  - **Column‑major**: `state[r,c] = in[4*c + r]`  
-  - Impresión por filas (4×4) para legibilidad.
-- **Rondas**
+  - **Column-major**: `state[r,c] = in[4*c + r]` (impresión 4×4 por filas).
+- **Secuencia de rondas**
   - Ronda 0: `AddRoundKey`
   - Rondas 1–9: `SubBytes → ShiftRows → MixColumns → AddRoundKey`
   - Ronda 10: `SubBytes → ShiftRows → AddRoundKey`
-- **Expansión de clave**
-  - `RotWord` (ROR 8), `SubWord` (S‑Box), `Rcon` aplicado al MSB, 44 palabras (K0..K10).
+- **Key Schedule**
+  - 11 subclaves × 16 B = **176 B** (`expandedKey`).
+  - `RotWord` (ROR 8), `SubWord` (S-Box) y `Rcon` en palabras múltiples de 4.
+- **Tiempo de ejecución**
+  - `clock_gettime` (syscall 113) → diferencia en **µs** → impresión como **ms.xxx**.
 
 ### Diagrama (mermaid)
 ```mermaid
@@ -130,17 +172,33 @@ flowchart LR
     R10 --> OUT[Ciphertext 16B]
 ```
 
-## 🧪 Depuración
-- El flag interno `debug_on` controla si se imprimen matrices tras cada etapa.  
-- Para “benchmark”, desactiva debug para eliminar el costo de I/O en consola.
+## 🔍 Funciones clave del código
+- **E/S (syscalls)**: macros `print`/`read` usando `write(64)`/`read(63)`.
+- **Entrada de texto**: `readTextInput` → coloca bytes **column-major** con padding `0x00`.
+- **Clave hex**: `convertHexKey` → ignora caracteres no hex, valida y convierte a bytes (column-major); mensaje de error si aplica.
+- **AES Core**:
+  - `subBytes`, `shiftRows`, `mixColumns` (con `xtime`, preservando callee-saved).
+  - `addRoundKey` por ronda.
+  - `keyExpansion` (44 palabras = 11×4B).
+  - `aes_encrypt` (coordina 10 rondas y **trazas** por etapa).
+- **Impresión**:
+  - `printMatrix` (4×4 hex).
+  - `print_hex_byte` / `_no_space` (para HEX continuo).
+  - `print_cipher_text` (**HEX**) y `print_cipher_text_ascii` (**ASCII**).
+- **Tiempo**:
+  - `get_time` (syscall 113), `print_execution_time` (ms con 3 decimales), `print_number`/`print_number_3digits`.
 
-> Tip: puedes agregar una opción de menú para **toggle** de `debug_on` si lo necesitas.
+## 🐞 Depuración y tips
+- **ASCII vs HEX**: el CT puede tener bytes no imprimibles → preferir **HEX** para validación.
+- **Encoding de terminal**: usa UTF-8 para evitar glifos raros (`export LC_ALL=C.UTF-8`).
+- **Benchmarks**: desactiva trazas si mides tiempo (la E/S domina el costo).
 
 ## 📈 Roadmap
-- [ ] Opción de **autotest** con vector NIST.
-- [ ] Modo **benchmark** con N repeticiones y estadísticos.
-- [ ] Optimización (desenrollado, tablas T o NEON).
-- [ ] Modos de operación (CBC/CTR/GCM) si el curso lo permite.
+- [ ] Toggle de **debug** desde el menú (on/off).
+- [ ] **Autotest** NIST (clave/PT precargados).
+- [ ] Modo **benchmark** (N repeticiones, min/mediana/max).
+- [ ] Optimización (desenrollado, T-tables o NEON, si el curso lo permite).
+- [ ] Modos de operación (CBC/CTR) *(si procede en el curso)*.
 
 ## 🤝 Contribuir
 1. Crea un branch: `git checkout -b feat/lo-que-sea`  
