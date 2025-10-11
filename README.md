@@ -143,8 +143,8 @@ CT : 69C4E0D86A7B0430D8CDB78070B4C55A
 ├─ Makefile              # Tareas de build/ejecución
 ├─ README.md             # Este documento
 └─ docs/
-   ├─ Informe técnico
-   └─ Informe de Impacto
+   ├─ Manual de Usuario
+   └─ Manuel Técnico
 ```
 
 ## 🧠 Diseño / Decisiones
@@ -206,8 +206,6 @@ flowchart LR
 3. Push: `git push origin feat/lo-que-sea`  
 4. Abre un PR.
 
-## 📜 Licencia
-Distribuido bajo la **MIT License**. Consulta `LICENSE` para más detalles.
 
 ---
 
