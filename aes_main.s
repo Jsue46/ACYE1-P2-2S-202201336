@@ -40,8 +40,49 @@
     msg_after_addroundkey: .asciz "Despues de AddRoundKey:\n"
         lenMsgAfterAdd = . - msg_after_addroundkey
 
+    msg_cipher_text: .asciz "Texto cifrado: "
+        lenMsgCipherText = . - msg_cipher_text
+    
+    msg_time: .asciz "\nTiempo de ejecucion: "
+        lenMsgTime = . - msg_time
+    
+    msg_ms: .asciz " ms\n"
+        lenMsgMs = . - msg_ms
+
+menu_msg: .asciz "\n=== MENU AES-128 ===\n1) Ingresar TEXTO (ASCII)\n2) Ingresar CLAVE (32 HEX)\n3) Ejecutar AES-128\n4) Informacion\n5) Salir\n> "
+    lenMenu = . - menu_msg
+
+info_msg: .asciz "\nAES-128: 10 rondas; bloque 16 bytes; clave 16 bytes.\nVector NIST:\nKey: 000102030405060708090A0B0C0D0E0F\nPT : 00112233445566778899AABBCCDDEEFF\nCT : 69C4E0D86A7B0430D8CDB78070B4C55A\n"
+    lenInfo = . - info_msg
+
+need_txt_msg: .asciz "Primero ingrese el TEXTO.\n"
+    lenNeedTxt = . - need_txt_msg
+
+need_key_msg: .asciz "Primero ingrese la CLAVE.\n"
+    lenNeedKey = . - need_key_msg
+
+run_msg:  .asciz "\nEjecutando AES-128...\n"
+    lenRun = . - run_msg
+done_msg: .asciz "Listo.\n"
+    lenDone = . - done_msg
+
+    msg_cipher_text_ascii: .asciz "Texto cifrado (ASCII): "
+    lenMsgCipherTextAscii = . - msg_cipher_text_ascii
+
+    msg_cipher_text_hex:   .asciz "Texto cifrado (HEX): "
+        lenMsgCipherHex = . - msg_cipher_text_hex
+
+    rk_prefix: .asciz "Subclave Ronda "
+    lenRkPrefix = . - rk_prefix
+
 // RESERVACION DE MEMORIA 
 .section .bss
+    .balign 1
+    .global has_text, has_keyf
+    has_text:  .space 1, 0
+
+    has_keyf:  .space 1, 0
+
     .global matState
     matState: .space 16, 0
 
@@ -57,6 +98,9 @@
     buffer: .space 256, 0
     
     tempColumn: .space 4, 0         // Temporal para MixColumns
+    start_time: .space 16, 0    // timespec struct (tv_sec, tv_nsec)
+    end_time: .space 16, 0
+
 
 // MACROS 
 .macro print fd, buffer, len
@@ -157,43 +201,62 @@ convertHexKey:
     
 convert_hex_loop:
     cmp x3, #16
-    b.ge convert_hex_done
+    b.ge validate_len
     
+
 skip_non_hex:
     ldrb w4, [x1, x11]
     cmp w4, #0
-    b.eq convert_hex_done
+    b.eq validate_len
     cmp w4, #10
-    b.eq convert_hex_done
-    
+    b.eq validate_len
+
     bl is_hex_char
     cmp w0, #1
-    b.eq process_hex_pair
-    
-    add x11, x11, #1
-    b skip_non_hex
-    
-process_hex_pair:
+    b.ne inc_cursor
+
+    // high nibble
     ldrb w4, [x1, x11]
     add x11, x11, #1
     bl hex_char_to_nibble
+    cmp w0, #0xFF
+    b.eq bad_key
     lsl w5, w0, #4
-    
+
+    // low nibble
     ldrb w4, [x1, x11]
     add x11, x11, #1
     bl hex_char_to_nibble
+    cmp w0, #0xFF
+    b.eq bad_key
     orr w5, w5, w0
-    
-    // Column-major: offset = row + (col * 4)
+        // Column-major: offset = row + (col * 4)
     mov x7, #4
     udiv x8, x3, x7           // col = index / 4
     msub x9, x8, x7, x3       // row = index % 4
     mul x10, x8, x7           // col * 4
     add x10, x10, x9          // + row
-    
-    strb w5, [x2, x10]
+
+    strb w5, [x2, x10]        // guardar byte en key
+
     add x3, x3, #1
     b convert_hex_loop
+
+
+inc_cursor:
+    add x11, x11, #1
+    b skip_non_hex
+
+validate_len:
+    cmp x3, #16
+    b.eq good_key
+bad_key:
+    print 1, key_err_msg, lenKeyErr
+    mov w0, #0
+    b convert_hex_done
+
+good_key:
+    mov w0, #1
     
 convert_hex_done:
     ldp x29, x30, [sp], #16
@@ -223,20 +286,27 @@ is_hex:
     ret
 
 hex_char_to_nibble:
+    // 0..9
     cmp w4, #'0'
-    b.lt hex_error
+    b.lt nibble_err
     cmp w4, #'9'
-    b.le hex_digit
-    
+    b.le is_digit
+    // A..F / a..f
     orr w4, w4, #0x20
     cmp w4, #'a'
-    b.lt hex_error
+    b.lt nibble_err
     cmp w4, #'f'
-    b.gt hex_error
-    
+    b.gt nibble_err
     sub w0, w4, #'a'
     add w0, w0, #10
     ret
+is_digit:
+    sub w0, w4, #'0'
+    ret
+nibble_err:
+    mov w0, #0xFF
+    ret
+
     
 hex_digit:
     sub w0, w4, #'0'
@@ -254,53 +324,55 @@ hex_error:
 .type printMatrix, %function
 .global printMatrix
 printMatrix:
-    stp x29, x30, [sp, #-48]!
+    // prólogo
+    stp x29, x30, [sp, #-96]!
     mov x29, sp
-    
-    str x0, [sp, #16]
-    str x1, [sp, #24]
-    str x2, [sp, #32]
-    
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    stp x23, x24, [sp, #48]
+    str x25, [sp, #64]
+
+    str x0, [sp, #72]     // matriz
+    str x1, [sp, #80]     // título
+    str x2, [sp, #88]     // len título
+
     mov x0, #1
-    ldr x1, [sp, #24]
-    ldr x2, [sp, #32]
+    ldr x1, [sp, #80]
+    ldr x2, [sp, #88]
     mov x8, #64
     svc #0
-    
-    mov x23, #0               // contador de filas
-    
-print_row_loop:
-    cmp x23, #4
-    b.ge print_matrix_done
-    
-    mov x24, #0               // contador de columnas
-    
-print_col_loop:
-    cmp x24, #4
-    b.ge print_row_newline
-    
-    // Column-major: índice = row + (col * 4)
+
+    mov x23, #0
+1:  cmp x23, #4
+    b.ge 3f
+    mov x24, #0
+2:  cmp x24, #4
+    b.ge 4f
+
     mov x25, #4
-    mul x25, x24, x25         // col * 4
-    add x25, x25, x23         // + row
-    
-    ldr x20, [sp, #16]
+    mul x25, x24, x25
+    add x25, x25, x23
+
+    ldr x20, [sp, #72]
     ldrb w0, [x20, x25]
     bl print_hex_byte
-    
+
     add x24, x24, #1
-    b print_col_loop
-    
-print_row_newline:
-    print 1, newline, 1
+    b 2b
+
+4:  print 1, newline, 1
     add x23, x23, #1
-    b print_row_loop
-    
-print_matrix_done:
-    print 1, newline, 1
-    ldp x29, x30, [sp], #48
+    b 1b
+
+3:  print 1, newline, 1
+
+    // epílogo
+    ldr x25, [sp, #64]
+    ldp x23, x24, [sp, #48]
+    ldp x21, x22, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #96
     ret
-    .size printMatrix, (. - printMatrix)
 
 /*
  * FUNCIÓN: print_hex_byte
@@ -845,6 +917,37 @@ print_round_end:
     ldp x29, x30, [sp], #16
     ret
     .size print_round_number, (. - print_round_number)
+/*
+ * FUNCIÓN: printRoundKeys
+ * Imprime las 11 subclaves (rondas 0..10) desde expandedKey
+ */
+.type printRoundKeys, %function
+.global printRoundKeys
+printRoundKeys:
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    mov x19, #0                  // ronda = 0..10
+
+1:  cmp x19, #11
+    b.ge 2f
+
+    print 1, rk_prefix, lenRkPrefix
+    mov x0, x19
+    bl print_number
+    print 1, newline, 1
+
+    ldr x20, =expandedKey        // <-- recargar base SIEMPRE
+    lsl x0, x19, #4
+    add x0, x20, x0
+    ldr x1, =debug_key
+    mov x2, lenDebugKey
+    bl printMatrix
+
+    add x19, x19, #1
+    b 1b
+
+2:  ldp x29, x30, [sp], #32
+    ret
 
 /*
  * FUNCIÓN: aes_encrypt
@@ -861,7 +964,11 @@ aes_encrypt:
     // Ronda inicial: AddRoundKey con la primera subclave
     mov x0, #0
     bl addRoundKey
-    
+    print 1, msg_after_addroundkey, lenMsgAfterAdd
+    ldr x0, =matState
+    ldr x1, =debug_state
+    mov x2, lenDebugState
+    bl printMatrix
     // 9 rondas principales (1 a 9)
     mov x19, #1
     
@@ -938,52 +1045,432 @@ final_round:
     ldp x29, x30, [sp], #32
     ret
     .size aes_encrypt, (. - aes_encrypt)
+/*
+ * FUNCIÓN: get_time
+ * Obtiene el tiempo actual
+ * Entrada: x0 = dirección donde guardar el timespec
+ */
+.type get_time, %function
+get_time:
+    mov x1, x0          // &timespec destino
+    mov x0, #1          // CLOCK_MONOTONIC
+    mov x8, #113        // clock_gettime
+    svc #0
+    ret
+
 
 /*
- * FUNCIÓN: _start
- * Función principal del programa
+ * FUNCIÓN: print_cipher_text
+ * Imprime el criptograma como cadena hexadecimal continua
  */
+.type print_cipher_text, %function
+print_cipher_text:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+
+   print 1, msg_cipher_text_hex,   lenMsgCipherHex
+
+    
+    ldr x19, =matState
+    mov x20, #0
+    
+print_cipher_loop:
+    cmp x20, #16
+    b.ge print_cipher_done
+    
+    ldrb w0, [x19, x20]
+    bl print_hex_byte_no_space    // versión sin espacio
+    
+    add x20, x20, #1
+    b print_cipher_loop
+    
+print_cipher_done:
+    print 1, newline, 1
+    
+    ldp x29, x30, [sp], #16
+    ret
+    .size print_cipher_text, (. - print_cipher_text)
+
+/*
+ * FUNCIÓN: print_hex_byte_no_space
+ * Imprime un byte en hexadecimal sin espacio
+ */
+print_hex_byte_no_space:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    
+    and w1, w0, #0xF0
+    lsr w1, w1, #4
+    and w2, w0, #0x0F
+    
+    cmp w1, #10
+    b.lt high_digit_ns
+    add w1, w1, #'A' - 10
+    b high_done_ns
+high_digit_ns:
+    add w1, w1, #'0'
+high_done_ns:
+    
+    cmp w2, #10
+    b.lt low_digit_ns
+    add w2, w2, #'A' - 10
+    b low_done_ns
+low_digit_ns:
+    add w2, w2, #'0'
+low_done_ns:
+    
+    sub sp, sp, #16
+    strb w1, [sp]
+    strb w2, [sp, #1]
+    
+    mov x0, #1
+    mov x1, sp
+    mov x2, #2
+    mov x8, #64
+    svc #0
+    
+    add sp, sp, #16
+    ldp x29, x30, [sp], #16
+    ret
+/*
+ * FUNCIÓN: print_execution_time
+ * Calcula e imprime el tiempo de ejecución en ms con 3 decimales
+ */
+.type print_execution_time, %function
+print_execution_time:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    
+    str x19, [sp, #16]
+    str x20, [sp, #24]
+    str x21, [sp, #32]
+    
+    // Cargar tiempos
+    ldr x0, =start_time
+    ldr x1, [x0]            // start_sec
+    ldr x2, [x0, #8]        // start_nsec
+    
+    ldr x0, =end_time
+    ldr x3, [x0]            // end_sec
+    ldr x4, [x0, #8]        // end_nsec
+    
+    // Calcular diferencia en nanosegundos
+    sub x5, x3, x1          // diff_sec
+    sub x6, x4, x2          // diff_nsec
+    
+    // Manejar caso de nsec negativo
+    cmp x6, #0
+    b.ge time_calc
+    
+    mov x7, #1000
+    mov x8, #1000
+    mul x7, x7, x8
+    mov x8, #1000
+    mul x7, x7, x8          // x7 = 1,000,000,000
+    add x6, x6, x7
+    sub x5, x5, #1
+    
+time_calc:
+    // Convertir todo a microsegundos para mayor precisión
+    // total_us = (sec * 1,000,000) + (nsec / 1,000)
+    mov x7, #1000
+    mov x8, #1000
+    mul x7, x7, x8          // x7 = 1,000,000
+    mul x19, x5, x7         // sec a microsegundos
+    
+    mov x7, #1000
+    udiv x8, x6, x7         // nsec a microsegundos
+    add x19, x19, x8        // total en microsegundos
+    
+    // Convertir microsegundos a milisegundos con 3 decimales
+    // ms = us / 1000, decimales = us % 1000
+    mov x7, #1000
+    udiv x20, x19, x7       // parte entera en ms
+    msub x21, x20, x7, x19  // parte decimal (microsegundos restantes)
+    
+    // Imprimir mensaje
+    print 1, msg_time, lenMsgTime
+    
+    // Imprimir parte entera
+    mov x0, x20
+    bl print_number
+    
+    // Imprimir punto decimal
+    sub sp, sp, #16
+    mov w0, #'.'
+    strb w0, [sp]
+    mov x0, #1
+    mov x1, sp
+    mov x2, #1
+    mov x8, #64
+    svc #0
+    add sp, sp, #16
+    
+    // Imprimir parte decimal (3 dígitos con padding)
+    mov x0, x21
+    bl print_number_3digits
+    
+    print 1, msg_ms, lenMsgMs
+    
+    ldr x19, [sp, #16]
+    ldr x20, [sp, #24]
+    ldr x21, [sp, #32]
+    
+    ldp x29, x30, [sp], #48
+    ret
+    .size print_execution_time, (. - print_execution_time)
+
+/*
+ * FUNCIÓN: print_number_3digits
+ * Imprime exactamente 3 dígitos (padding con ceros), x0: 0..999
+ */
+.type print_number_3digits, %function
+print_number_3digits:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+
+    sub sp, sp, #16
+
+    // centenas
+    mov x1, #100
+    udiv x2, x0, x1           // x2 = centenas
+    msub x0, x2, x1, x0       // x0 = resto 0..99
+    add w2, w2, #'0'
+    strb w2, [sp]
+
+    // decenas
+    mov x1, #10
+    udiv x3, x0, x1           // x3 = decenas
+    msub x0, x3, x1, x0       // x0 = unidades 0..9
+    add w3, w3, #'0'
+    strb w3, [sp, #1]
+
+    // unidades
+    add w0, w0, #'0'
+    strb w0, [sp, #2]
+
+    // write(1, sp, 3)
+    mov x0, #1
+    mov x1, sp
+    mov x2, #3
+    mov x8, #64
+    svc #0
+
+    add sp, sp, #16
+    ldp x29, x30, [sp], #16
+    ret
+    .size print_number_3digits, (. - print_number_3digits)
+
+/*
+ * FUNCIÓN: print_number
+ * Imprime un número decimal
+ * Entrada: x0 = número a imprimir
+ */
+.type print_number, %function
+print_number:
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    
+    sub sp, sp, #32
+    mov x1, sp
+    add x1, x1, #31         // apuntar al final del buffer
+    mov x2, #0              // contador de dígitos
+    
+    cbz x0, print_zero
+    
+convert_loop:
+    cbz x0, print_digits
+    mov x3, #10
+    udiv x4, x0, x3         // x4 = x0 / 10
+    msub x5, x4, x3, x0     // x5 = x0 % 10
+    add x5, x5, #'0'        // convertir a ASCII
+    strb w5, [x1]
+    sub x1, x1, #1
+    add x2, x2, #1
+    mov x0, x4
+    b convert_loop
+    
+print_zero:
+    mov w3, #'0'
+    strb w3, [x1]
+    mov x2, #1
+    b print_digits
+    
+print_digits:
+    add x1, x1, #1         // x1 -> primer dígito
+    mov x0, #1
+    // x2 ya contiene la cuenta de dígitos; no lo toques
+    mov x8, #64
+    svc #0
+    
+    add sp, sp, #32
+    ldp x29, x30, [sp], #32
+    ret
+    .size print_number, (. - print_number)
+
+/*
+ * FUNCIÓN: print_cipher_text_ascii
+ * Imprime el criptograma como caracteres
+ */
+.type print_cipher_text_ascii, %function
+print_cipher_text_ascii:
+    stp x29, x30, [sp, #-32]!
+    mov x29, sp
+    
+    str x19, [sp, #16]
+    str x20, [sp, #24]
+    
+print 1, msg_cipher_text_ascii, lenMsgCipherTextAscii
+
+    
+    ldr x19, =matState
+    sub sp, sp, #16
+    mov x20, #0
+    
+print_ascii_loop:
+    cmp x20, #16
+    b.ge print_ascii_done
+    
+    ldrb w0, [x19, x20]
+    strb w0, [sp]
+    
+    mov x0, #1
+    mov x1, sp
+    mov x2, #1
+    mov x8, #64
+    svc #0
+    
+    add x20, x20, #1
+    b print_ascii_loop
+    
+print_ascii_done:
+    add sp, sp, #16
+    print 1, newline, 1
+    
+    ldr x19, [sp, #16]
+    ldr x20, [sp, #24]
+    
+    ldp x29, x30, [sp], #32
+    ret
+    .size print_cipher_text_ascii, (. - print_cipher_text_ascii)
+.section .text
 .type _start, %function
 .global _start
 _start:
-    // Leer texto a cifrar
+    // Inicializar banderas
+    ldr x0, =has_text
+    mov w1, #0
+    strb w1, [x0]
+    ldr x0, =has_keyf
+    strb w1, [x0]
+
+menu_loop:
+    print 1, menu_msg, lenMenu
+    read  0, buffer, 16
+    ldr   x0, =buffer
+    ldrb  w0, [x0]            // primer carácter
+
+    cmp w0, #'1'
+    b.eq opt_text
+    cmp w0, #'2'
+    b.eq opt_key
+    cmp w0, #'3'
+    b.eq opt_run
+    cmp w0, #'4'
+    b.eq opt_info
+    cmp w0, #'5'
+    b.eq opt_exit
+    b menu_loop               // opción inválida -> repetir
+
+// 1) Ingresar TEXTO
+opt_text:
     print 1, msg_txt, lenMsgTxt
     bl readTextInput
-    
-    // Mostrar estado inicial
-    print 1, debug_state, lenDebugState
+    ldr x1, =has_text
+    mov w0, #1
+    strb w0, [x1]
+
+    // Mostrar estado (opcional)
+
     ldr x0, =matState
     ldr x1, =debug_state
     mov x2, lenDebugState
     bl printMatrix
-    
-    // Leer clave
+    b menu_loop
+
+// 2) Ingresar CLAVE
+opt_key:
     print 1, msg_key, lenMsgKey
     bl convertHexKey
-    
-    // Mostrar clave
-    print 1, debug_key, lenDebugKey
+    cbz w0, menu_loop              // si falló, no marcar flag ni imprimir matriz
+
+    ldr x1, =has_keyf
+    mov w0, #1
+    strb w0, [x1]
+
+
     ldr x0, =key
     ldr x1, =debug_key
     mov x2, lenDebugKey
     bl printMatrix
-    
-    // Expandir clave
+    b menu_loop
+
+
+// 3) Ejecutar AES-128
+opt_run:
+    // Verificar prerequisitos
+    ldr x0, =has_text
+    ldrb w0, [x0]
+    cbz w0, faltatexto
+    ldr x0, =has_keyf
+    ldrb w0, [x0]
+    cbz w0, faltaclave
+
+    print 1, run_msg, lenRun
+
+    // ===== INICIAR TIEMPO =====
+    ldr x0, =start_time
+    bl get_time              // usa syscall 113 (clock_gettime)
+
+    // Ejecutar AES
     bl keyExpansion
-    
-    // Realizar cifrado AES-128 completo
+    bl printRoundKeys    
     bl aes_encrypt
-    
-    // Mostrar criptograma final
+
+    // ===== DETENER TIEMPO =====
+    ldr x0, =end_time
+    bl get_time
+
+    // (Opcional) matriz final
     print 1, msg_final, lenMsgFinal
     ldr x0, =matState
     ldr x1, =debug_state
     mov x2, lenDebugState
     bl printMatrix
-    
-    // Salir del programa
+
+    // ===== TEXTO CIFRADO Y TIEMPO (como antes) =====
+    bl print_cipher_text
+    bl print_cipher_text_ascii     // si prefieres HEX continuo, usa print_cipher_text
+    bl print_execution_time        // imprime "... ms" con 3 decimales
+
+    print 1, done_msg, lenDone
+    b menu_loop
+
+faltatexto:
+    print 1, need_txt_msg, lenNeedTxt
+    b menu_loop
+faltaclave:
+    print 1, need_key_msg, lenNeedKey
+    b menu_loop
+
+
+// 4) Información
+opt_info:
+    print 1, info_msg, lenInfo
+    b menu_loop
+
+// 5) Salir
+opt_exit:
     mov x0, #0
-    mov x8, #93
+    mov x8, #93          // SYS_exit
     svc #0
-    
-    .size _start, (. - _start)
